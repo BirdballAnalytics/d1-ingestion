@@ -1,0 +1,51 @@
+name: Ingest D1 pitch data
+
+"on":
+  schedule:
+    # Every 3 hours. Adjust once you have a sense of real pull speed --
+    # the goal early on is to work through the backfill queue as fast as
+    # the API's rate limits comfortably allow; once caught up, this can
+    # drop to once or twice a day to pick up newly-played games.
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      season:
+        description: 'Season year to discover games for (leave blank to skip discovery and just pull pending games)'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: ingest
+        run: pip install -r requirements.txt
+
+      - name: Discover new games (manual trigger with a season only)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.season != ''
+        working-directory: ingest
+        env:
+          TRUMEDIA_USERNAME: ${{ secrets.TRUMEDIA_USERNAME }}
+          TRUMEDIA_SITENAME: ${{ secrets.TRUMEDIA_SITENAME }}
+          TRUMEDIA_MASTER_TOKEN: ${{ secrets.TRUMEDIA_MASTER_TOKEN }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python discover.py --season ${{ github.event.inputs.season }}
+
+      - name: Pull pending games
+        working-directory: ingest
+        env:
+          TRUMEDIA_USERNAME: ${{ secrets.TRUMEDIA_USERNAME }}
+          TRUMEDIA_SITENAME: ${{ secrets.TRUMEDIA_SITENAME }}
+          TRUMEDIA_MASTER_TOKEN: ${{ secrets.TRUMEDIA_MASTER_TOKEN }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python pull_pitches.py --limit 40 --max-minutes 25
