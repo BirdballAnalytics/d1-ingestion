@@ -1,38 +1,38 @@
 """
 discover.py — Step 1 of the ingestion pipeline.
 
-Pulls the full list of D1 teams and games for a given season from
+Pulls the full list of teams and games for a given season from
 TruMedia (AllTeams / AllGames) and upserts them into Supabase. This is
 what builds the "work queue" the pull_pitches.py script consumes —
-every game lands in the `games` table with status='pending', and each
-scheduled run of pull_pitches.py chips away at that queue.
+every D1 game lands in the `games` table with status='pending', and
+each scheduled run of pull_pitches.py chips away at that queue.
 
 Run this once per season to seed the queue, and periodically during the
 season to pick up newly-played games.
 
-NOTE ON THE D1 FILTER: the API docs' own example filters a PLAYER-level
-query using `season.seasonLevel IN ('BBC','SFT') AND team.game.gameLeague
-= 'D1'`. This script applies the same idea to a GAME-level query, but the
-exact field path (team.game.gameLeague vs. game.gameLeague, etc.) could
-plausibly differ at that level — I couldn't verify this against a live
-call. The script prints how many teams/games it found after filtering;
-if that number looks obviously wrong (e.g. way more than the ~300 D1
-programs that exist, or zero), the filter string below is the first
-thing to check and adjust.
+ON THE D1 FILTER: an earlier version of this script tried to filter
+AllGames server-side via the API's `filters` query parameter, guessed
+from the one filter example in the docs (which was for a different
+query type). That guess turned out to be invalid enough to make the API
+return a 500 error, not just wrong results — so rather than guess again
+against a live paid API, this version pulls AllGames unfiltered (which
+works reliably) and filters to D1 in Python instead. The real response
+includes `homeConference`/`awayConference` fields formatted like
+"D1 Atlantic Coast Conference" — a game is kept if either team's
+conference starts with "D1". A game is included if EITHER side is a D1
+program, so a D1 team's non-conference games against lower levels still
+get pulled — the goal is "every D1 team's full schedule," not "every
+game where both sides happen to be D1."
 """
 import argparse
 import io
 import os
-import sys
-import urllib.parse
 
 import pandas as pd
 import psycopg2
 import psycopg2.extras
 
 from trumedia_client import TruMediaClient
-
-D1_FILTER = "&filters=((season.seasonLevel%20IN%20('BBC'%2C'SFT'))%20AND%20(game.gameLeague%20%3D%20'D1'))"
 
 
 def get_db():
@@ -46,6 +46,12 @@ def fetch_csv(client, data_format, params):
     return pd.read_csv(io.StringIO(text))
 
 
+def is_d1(row):
+    home_conf = str(row.get("homeConference") or "").strip().upper()
+    away_conf = str(row.get("awayConference") or "").strip().upper()
+    return home_conf.startswith("D1") or away_conf.startswith("D1")
+
+
 def upsert_teams(conn, teams_df):
     if teams_df.empty:
         return 0
@@ -56,9 +62,9 @@ def upsert_teams(conn, teams_df):
             continue
         rows.append((
             team_id,
-            r.get("teamName") or r.get("name"),
-            r.get("conference"),
-            "D1",
+            r.get("teamName") or r.get("fullName"),
+            r.get("conference"),   # not present in AllTeams today; kept in case it's added later
+            None,                  # division unknown from AllTeams alone -- see note in README
             psycopg2.extras.Json(r.dropna().to_dict()),
         ))
     with conn.cursor() as cur:
@@ -69,7 +75,7 @@ def upsert_teams(conn, teams_df):
             values %s
             on conflict (team_id) do update set
                 team_name = excluded.team_name,
-                conference = excluded.conference,
+                conference = coalesce(excluded.conference, teams.conference),
                 raw = excluded.raw,
                 updated_at = now()
             """,
@@ -87,14 +93,20 @@ def upsert_games(conn, games_df, season_year):
         trackman_id = r.get("trackmanGameId") or r.get("trackmanGameID")
         if not trackman_id or (isinstance(trackman_id, float) and pd.isna(trackman_id)):
             continue  # skip games with no trackman ID -- nothing to pull for them
+        game_date = r.get("gameDate") or r.get("date")
+        if isinstance(game_date, str):
+            game_date = game_date.split(" ")[0]  # drop the time component, keep just YYYY-MM-DD
+        home_conf = str(r.get("homeConference") or "")
+        away_conf = str(r.get("awayConference") or "")
+        league = "D1" if (home_conf.strip().upper().startswith("D1") or away_conf.strip().upper().startswith("D1")) else None
         rows.append((
             str(trackman_id),
             str(r.get("gameId") or r.get("id") or ""),
             season_year,
-            r.get("date") or r.get("gameDate"),
+            game_date,
             str(r.get("homeTeamId") or r.get("homeTeam") or "") or None,
             str(r.get("awayTeamId") or r.get("awayTeam") or "") or None,
-            r.get("gameLeague", "D1"),
+            league,
             psycopg2.extras.Json(r.dropna().astype(str).to_dict()),
         ))
     if not rows:
@@ -124,27 +136,28 @@ def main():
     conn = get_db()
 
     print(f"Fetching AllTeams for {args.season}...")
-    teams_df = fetch_csv(client, "AllTeams", {"seasonYear": args.season}) 
+    teams_df = fetch_csv(client, "AllTeams", {"seasonYear": args.season})
     print(f"  Raw AllTeams columns: {list(teams_df.columns)}")
-    print(f"  {len(teams_df)} teams returned before any D1 filtering.")
+    print(f"  {len(teams_df)} teams returned (all levels combined -- AllTeams has no division field to filter on).")
     n_teams = upsert_teams(conn, teams_df)
     print(f"  Upserted {n_teams} teams.")
 
-    print(f"\nFetching AllGames for {args.season} (D1 filter applied)...")
-    try:
-        games_df = fetch_csv(client, "AllGames", {"seasonYear": args.season, "filters": D1_FILTER})
-    except Exception as e:
-        print(f"  D1-filtered AllGames call failed ({e}); falling back to unfiltered pull so you can inspect real columns/fields.")
-        games_df = fetch_csv(client, "AllGames", {"seasonYear": args.season})
+    print(f"\nFetching AllGames for {args.season} (unfiltered, then filtered to D1 in Python)...")
+    games_df = fetch_csv(client, "AllGames", {"seasonYear": args.season})
     print(f"  Raw AllGames columns: {list(games_df.columns)}")
-    print(f"  {len(games_df)} games returned.")
+    print(f"  {len(games_df)} games returned before D1 filtering.")
     if len(games_df):
         print(f"  Sample row: {games_df.iloc[0].to_dict()}")
-    n_games = upsert_games(conn, games_df, args.season)
-    print(f"  Queued {n_games} new games (status='pending'). Existing games left untouched.")
+
+    d1_games_df = games_df[games_df.apply(is_d1, axis=1)]
+    print(f"  {len(d1_games_df)} games are D1 (either home or away conference starts with 'D1').")
+
+    n_games = upsert_games(conn, d1_games_df, args.season)
+    print(f"  Queued {n_games} new D1 games (status='pending'). Existing games left untouched.")
 
     conn.close()
 
 
 if __name__ == "__main__":
     main()
+
