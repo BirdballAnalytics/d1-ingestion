@@ -73,9 +73,8 @@ COLUMN_MAP = {
     "batter_team":                           ["battingTeamName"],
     "tagged_pitch_type":                      ["pitchType"],
     "pitch_call":                              ["pitchResult"],    # medium confidence -- need real values to confirm semantics
-    "kor_bb":                                   ["atBatResult"],   # LOW confidence -- likely needs parsing, not a direct rename
-    "play_result":                                ["atBatResult"],  # LOW confidence -- same source as kor_bb above, tentative
-    "outs_on_play":                                 ["totalOuts"],   # LOW confidence -- may be cumulative, not per-play
+    "play_result":                                ["atBatResult"],  # CONFIRMED against real data: S/K/SH-style PA outcome codes
+    "outs_on_play":                                 ["totalOuts"],   # CONFIRMED against real data: 0 on true in-play outcomes, null on fouls
     "rel_speed":                                      ["releaseVelocity"],
     "spin_rate":                                        ["spinRate"],
     "spin_axis":                                          ["spinDir"],
@@ -96,10 +95,22 @@ COLUMN_MAP = {
     #   distance, bearing, contact_position_x/y/z
 }
 
+# plate_loc_height/plate_loc_side (pzNorm/pxNorm) are confirmed NOT to be
+# raw feet -- a real pulled row had plate_loc_height = -0.928, which is
+# impossible for a literal height above the ground. "Norm" evidently means
+# normalized to some scale we haven't confirmed yet (a fixed generic zone?
+# a batter-specific dynamic one? something else?). The raw pzNorm/pxNorm
+# values are still stored in these columns below since they're real,
+# useful data -- just don't treat them as feet until TruMedia confirms
+# the actual normalization. See the note in the README about the
+# question worth asking their support team directly.
+
 STRIKE_TOP, STRIKE_BOTTOM, STRIKE_LEFT, STRIKE_RIGHT = 3.5, 1.5, -0.95, 0.95
 
 
 def attack_zone(height, side):
+    # Not currently called from transform() -- see the note there. Kept
+    # here ready to use once pzNorm/pxNorm's real normalization is known.
     if pd.isna(height) or pd.isna(side):
         return None
     cx = (STRIKE_LEFT + STRIKE_RIGHT) / 2
@@ -176,11 +187,27 @@ def transform(df, trackman_game_id, season_year):
     if "date" in out.columns:
         out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
 
+    # kor_bb: play_result (atBatResult) carries EVERY plate-appearance
+    # outcome (confirmed against real data: singles, strikeouts, sac
+    # hits, etc. all come through the same field), but kor_bb specifically
+    # means "was this a strikeout or a walk, blank otherwise" -- the old
+    # app's narrower convention. "K" is confirmed correct from a real
+    # pulled row; "BB" for walk is an educated guess not yet confirmed
+    # against real data (no walk appeared in the sample checked so far).
+    KOR_BB_CODES = {"K", "BB"}
+    out["kor_bb"] = out["play_result"].where(out["play_result"].isin(KOR_BB_CODES), None)
+
     for c in ["plate_loc_height", "plate_loc_side"]:
         out[c] = pd.to_numeric(out[c], errors="coerce")
-    out["attack_zone"] = [
-        attack_zone(h, s) for h, s in zip(out["plate_loc_height"], out["plate_loc_side"])
-    ]
+    # attack_zone is deliberately NOT computed right now. A real pulled
+    # row had plate_loc_height = -0.928 -- proof pzNorm/pxNorm aren't raw
+    # feet the way this was originally written to assume, so the
+    # Heart/Shadow/Chase/Waste geometry (which needs real feet) would be
+    # confidently wrong rather than just imprecise. Left null until the
+    # actual pzNorm/pxNorm normalization is confirmed (see README) --
+    # at that point this is a bulk UPDATE against the `raw` column
+    # already stored below, not a re-pull from the API.
+    out["attack_zone"] = None
 
     out["raw"] = df.apply(lambda r: r.dropna().astype(str).to_dict(), axis=1)
 
@@ -254,10 +281,11 @@ def main():
                 continue
 
             transformed, unmapped = transform(df, tid, g["season_year"])
-            if unmapped and n_success == 0 and n_error == 0:
-                print(f"  NOTE: these target fields found no matching source column: {unmapped}")
+            if n_success == 0 and n_error == 0:
+                if unmapped:
+                    print(f"  NOTE: these target fields found no matching source column: {unmapped}")
                 print(f"        Actual columns in the response: {list(df.columns)}")
-                print(f"        Sample row (actual values, for verifying the tentative mappings): {df.iloc[0].to_dict()}")
+                print(f"        Sample row (actual values): {df.iloc[0].to_dict()}")
 
             n_rows = load_pitches(conn, transformed)
             mark_game(conn, tid, "success")
