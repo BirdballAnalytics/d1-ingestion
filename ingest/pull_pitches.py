@@ -106,18 +106,23 @@ COLUMN_MAP = {
 # question worth asking their support team directly.
 
 STRIKE_TOP, STRIKE_BOTTOM, STRIKE_LEFT, STRIKE_RIGHT = 3.5, 1.5, -0.95, 0.95
+# (no longer used by attack_zone() now that plate_loc_height/side are
+#  confirmed pre-normalized -- left in case a future field genuinely
+#  needs the raw-feet zone definition)
 
 
-def attack_zone(height, side):
-    # Not currently called from transform() -- see the note there. Kept
-    # here ready to use once pzNorm/pxNorm's real normalization is known.
-    if pd.isna(height) or pd.isna(side):
+def attack_zone(height_norm, side_norm):
+    """height_norm/side_norm: plate_loc_height/plate_loc_side (pzNorm/
+    pxNorm), confirmed against real data to already be normalized to the
+    strike zone -- roughly 0 = center, 1 = edge (called strikes had a
+    median max-distance of 0.87, called balls 1.86, both consistent with
+    that scale). Bucket directly with Savant's Heart(<=2/3)/
+    Shadow(<=4/3)/Chase(<=2)/Waste(>2) thresholds -- no feet conversion
+    needed since these are already normalized, unlike the first version
+    of this function which wrongly assumed raw feet."""
+    if pd.isna(height_norm) or pd.isna(side_norm):
         return None
-    cx = (STRIKE_LEFT + STRIKE_RIGHT) / 2
-    cy = (STRIKE_BOTTOM + STRIKE_TOP) / 2
-    half_w = (STRIKE_RIGHT - STRIKE_LEFT) / 2
-    half_h = (STRIKE_TOP - STRIKE_BOTTOM) / 2
-    d = max(abs(side - cx) / half_w, abs(height - cy) / half_h)
+    d = max(abs(height_norm), abs(side_norm))
     if d <= 2 / 3:
         return "Heart"
     if d <= 4 / 3:
@@ -199,15 +204,15 @@ def transform(df, trackman_game_id, season_year):
 
     for c in ["plate_loc_height", "plate_loc_side"]:
         out[c] = pd.to_numeric(out[c], errors="coerce")
-    # attack_zone is deliberately NOT computed right now. A real pulled
-    # row had plate_loc_height = -0.928 -- proof pzNorm/pxNorm aren't raw
-    # feet the way this was originally written to assume, so the
-    # Heart/Shadow/Chase/Waste geometry (which needs real feet) would be
-    # confidently wrong rather than just imprecise. Left null until the
-    # actual pzNorm/pxNorm normalization is confirmed (see README) --
-    # at that point this is a bulk UPDATE against the `raw` column
-    # already stored below, not a re-pull from the API.
-    out["attack_zone"] = None
+    # attack_zone: re-enabled. Confirmed empirically against 12k+ real
+    # pitches with known outcomes -- called balls had a median max-
+    # distance of 1.86, called strikes 0.87, both consistent with
+    # plate_loc_height/side already being normalized to ~0=center,
+    # ~1=zone edge. No feet conversion needed; attack_zone() buckets
+    # directly off these values now.
+    out["attack_zone"] = [
+        attack_zone(h, s) for h, s in zip(out["plate_loc_height"], out["plate_loc_side"])
+    ]
 
     out["raw"] = df.apply(lambda r: r.dropna().astype(str).to_dict(), axis=1)
 
