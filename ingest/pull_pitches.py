@@ -177,6 +177,13 @@ def load_pitches(conn, df):
     if df.empty:
         return 0
     cols = list(df.columns)
+    df = df.copy()
+    # psycopg2 needs a plain Python dict explicitly wrapped in Json(...)
+    # before it'll adapt it for a jsonb column -- otherwise it raises
+    # "can't adapt type 'dict'". discover.py already does this correctly
+    # for teams/games; this was the one spot that didn't.
+    if "raw" in df.columns:
+        df["raw"] = df["raw"].apply(lambda d: psycopg2.extras.Json(d) if d is not None else None)
     values = [tuple(row) for row in df[cols].itertuples(index=False)]
     placeholders = ", ".join(cols)
     with conn.cursor() as cur:
