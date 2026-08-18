@@ -20,19 +20,30 @@ What this script deliberately does NOT do:
   - AttackZone (Heart/Shadow/Chase/Waste) IS computed here, inline —
     it's pure geometry with no model dependency, cheap to do per-row.
 
-COLUMN MAPPING CAVEAT: GamePitchesTrackman should return standard
-TrackMan field names (that's the whole point of "Trackman format"),
-which is what the mapping below assumes -- these are the same names the
-hand-uploaded CSVs have used throughout this project. But this hasn't
-been verified against a live response. On the first real run, check the
-"unmapped source columns" and "target fields with no data" log lines —
-those tell you exactly what to adjust in COLUMN_MAP below.
+COLUMN MAPPING — REVISED AFTER A REAL RUN: an earlier version of this
+script assumed GamePitchesTrackman returns standard TrackMan CSV export
+field names (RelSpeed, PlateLocHeight, etc.), the same names the
+hand-uploaded CSVs use. That assumption was wrong — TruMedia reformats
+everything into its own naming convention (releaseVelocity, pzNorm/
+pxNorm, x0/z0, etc.). The mapping below is built from the real column
+list a live run returned. Some map with high confidence (exact
+conceptual matches: extension, inducedVertBreak, horzBreak,
+vertApprAngle, horzApprAngle, spinRate, exitVelocity, launchAngle).
+Others are an educated guess from the field NAME alone, since only
+column names were visible, not actual values, at the time this was
+written — those are flagged inline. And a handful of fields the app
+depends on (tagged_hit_type, runs_scored per play, effective_velo,
+batted-ball direction/distance/bearing, contact position x/y/z) don't
+appear in this endpoint's column list at all — worth asking TruMedia
+support directly whether GamePitchesTrackman supports requesting
+additional columns for batted-ball trajectory detail, since the docs'
+`columns` parameter is documented mainly for aggregate query types, and
+it's unclear whether it applies here too.
 """
 import argparse
 import io
 import os
 import time
-from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -43,57 +54,63 @@ from trumedia_client import TruMediaClient
 
 # target_column: [list of possible source column names, checked in order]
 COLUMN_MAP = {
-    "pitch_no": ["PitchNo", "PitchNumber"],
-    "date": ["Date"],
-    "inning": ["Inning"],
-    "top_bottom": ["Top/Bottom", "TopBottom"],
-    "outs": ["Outs"],
-    "balls": ["Balls"],
-    "strikes": ["Strikes"],
-    "pa_of_inning": ["PAofInning"],
-    "pitch_of_pa": ["PitchofPA"],
-    "pitcher_id": ["PitcherId", "PitcherID"],
-    "pitcher": ["Pitcher"],
-    "pitcher_throws": ["PitcherThrows"],
-    "pitcher_team": ["PitcherTeam"],
-    "batter_id": ["BatterId", "BatterID"],
-    "batter": ["Batter"],
-    "batter_side": ["BatterSide"],
-    "batter_team": ["BatterTeam"],
-    "tagged_pitch_type": ["TaggedPitchType", "AutoPitchType"],
-    "pitch_call": ["PitchCall"],
-    "kor_bb": ["KorBB"],
-    "tagged_hit_type": ["TaggedHitType"],
-    "play_result": ["PlayResult"],
-    "outs_on_play": ["OutsOnPlay"],
-    "runs_scored": ["RunsScored"],
-    "rel_speed": ["RelSpeed"],
-    "effective_velo": ["EffectiveVelo"],
-    "spin_rate": ["SpinRate"],
-    "spin_axis": ["SpinAxis"],
-    "rel_height": ["RelHeight"],
-    "rel_side": ["RelSide"],
-    "extension": ["Extension"],
-    "induced_vert_break": ["InducedVertBreak"],
-    "horz_break": ["HorzBreak"],
-    "plate_loc_height": ["PlateLocHeight"],
-    "plate_loc_side": ["PlateLocSide"],
-    "vert_appr_angle": ["VertApprAngle"],
-    "horz_appr_angle": ["HorzApprAngle"],
-    "exit_speed": ["ExitSpeed"],
-    "angle": ["Angle"],
-    "direction": ["Direction"],
-    "distance": ["Distance"],
-    "bearing": ["Bearing"],
-    "contact_position_x": ["ContactPositionX"],
-    "contact_position_y": ["ContactPositionY"],
-    "contact_position_z": ["ContactPositionZ"],
+    "pitch_uid":            ["trackmanPitchUID"],
+    "date":                 ["gameDate"],
+    "inning":                ["inning"],
+    "top_bottom":             ["side"],                    # values not yet confirmed (Top/Bottom? T/B?)
+    "outs":                    ["outs"],
+    "balls":                    ["balls"],
+    "strikes":                   ["strikes"],
+    "pa_of_inning":                ["abNumInSide"],         # at-bat number within the half-inning
+    "pitch_of_pa":                   ["pitchNumInAB"],
+    "pitcher_id":                     ["pitcherId"],
+    "pitcher":                         ["pitcherName"],
+    "pitcher_throws":                   ["pitcherHand"],
+    "pitcher_team":                      ["pitchingTeamName"],
+    "batter_id":                          ["batterId"],
+    "batter":                              ["batterName"],
+    "batter_side":                          ["batterHand"],
+    "batter_team":                           ["battingTeamName"],
+    "tagged_pitch_type":                      ["pitchType"],
+    "pitch_call":                              ["pitchResult"],    # medium confidence -- need real values to confirm semantics
+    "play_result":                                ["atBatResult"],  # CONFIRMED against real data: S/K/SH-style PA outcome codes
+    "outs_on_play":                                 ["totalOuts"],   # CONFIRMED against real data: 0 on true in-play outcomes, null on fouls
+    "rel_speed":                                      ["releaseVelocity"],
+    "spin_rate":                                        ["spinRate"],
+    "spin_axis":                                          ["spinDir"],
+    "rel_height":                                           ["z0"],   # tentative -- standard TrackMan physics notation guess
+    "rel_side":                                               ["x0"],  # tentative, same caveat
+    "extension":                                                ["extension"],
+    "induced_vert_break":                                         ["inducedVertBreak"],
+    "horz_break":                                                   ["horzBreak"],
+    "plate_loc_height":                                               ["pzNorm"],  # tentative -- "Norm" suggests normalized plate location
+    "plate_loc_side":                                                   ["pxNorm"],  # tentative, same caveat
+    "vert_appr_angle":                                                    ["vertApprAngle"],
+    "horz_appr_angle":                                                      ["horzApprAngle"],
+    "exit_speed":                                                             ["exitVelocity"],
+    "angle":                                                                    ["launchAngle"],
+    # No match found in the real response for these -- left unmapped on
+    # purpose rather than guessing at a wrong column:
+    #   tagged_hit_type, runs_scored, effective_velo, direction,
+    #   distance, bearing, contact_position_x/y/z
 }
+
+# plate_loc_height/plate_loc_side (pzNorm/pxNorm) are confirmed NOT to be
+# raw feet -- a real pulled row had plate_loc_height = -0.928, which is
+# impossible for a literal height above the ground. "Norm" evidently means
+# normalized to some scale we haven't confirmed yet (a fixed generic zone?
+# a batter-specific dynamic one? something else?). The raw pzNorm/pxNorm
+# values are still stored in these columns below since they're real,
+# useful data -- just don't treat them as feet until TruMedia confirms
+# the actual normalization. See the note in the README about the
+# question worth asking their support team directly.
 
 STRIKE_TOP, STRIKE_BOTTOM, STRIKE_LEFT, STRIKE_RIGHT = 3.5, 1.5, -0.95, 0.95
 
 
 def attack_zone(height, side):
+    # Not currently called from transform() -- see the note there. Kept
+    # here ready to use once pzNorm/pxNorm's real normalization is known.
     if pd.isna(height) or pd.isna(side):
         return None
     cx = (STRIKE_LEFT + STRIKE_RIGHT) / 2
@@ -131,6 +148,8 @@ def claim_pending_games(conn, limit):
 
 
 def mark_game(conn, trackman_game_id, status, error_message=None):
+    # Caller is responsible for rolling back any failed transaction on
+    # this connection first -- see the fix in main()'s except block.
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -160,16 +179,46 @@ def transform(df, trackman_game_id, season_year):
 
     out["trackman_game_id"] = trackman_game_id
     out["season_year"] = season_year
+    # pitch_no: no true sequence field exists in the real response: use
+    # row position in the pulled dataframe as a best-effort display value.
+    # NOT used for deduplication -- pitch_uid handles that.
+    out["pitch_no"] = range(1, len(out) + 1)
+
     if "date" in out.columns:
         out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
 
+    # kor_bb: play_result (atBatResult) carries EVERY plate-appearance
+    # outcome (confirmed against real data: singles, strikeouts, sac
+    # hits, etc. all come through the same field), but kor_bb specifically
+    # means "was this a strikeout or a walk, blank otherwise" -- the old
+    # app's narrower convention. "K" is confirmed correct from a real
+    # pulled row; "BB" for walk is an educated guess not yet confirmed
+    # against real data (no walk appeared in the sample checked so far).
+    KOR_BB_CODES = {"K", "BB"}
+    out["kor_bb"] = out["play_result"].where(out["play_result"].isin(KOR_BB_CODES), None)
+
     for c in ["plate_loc_height", "plate_loc_side"]:
         out[c] = pd.to_numeric(out[c], errors="coerce")
-    out["attack_zone"] = [
-        attack_zone(h, s) for h, s in zip(out["plate_loc_height"], out["plate_loc_side"])
-    ]
+    # attack_zone is deliberately NOT computed right now. A real pulled
+    # row had plate_loc_height = -0.928 -- proof pzNorm/pxNorm aren't raw
+    # feet the way this was originally written to assume, so the
+    # Heart/Shadow/Chase/Waste geometry (which needs real feet) would be
+    # confidently wrong rather than just imprecise. Left null until the
+    # actual pzNorm/pxNorm normalization is confirmed (see README) --
+    # at that point this is a bulk UPDATE against the `raw` column
+    # already stored below, not a re-pull from the API.
+    out["attack_zone"] = None
 
     out["raw"] = df.apply(lambda r: r.dropna().astype(str).to_dict(), axis=1)
+
+    # Convert every NaN/NaT throughout the frame to a real Python None.
+    # psycopg2 doesn't reliably adapt pandas' NaN/NaT sentinels -- a NaT
+    # in particular gets stringified to the literal text "NaT", which
+    # Postgres then rejects as an invalid date. This is a blanket fix
+    # rather than a per-column one, since the same failure mode could
+    # show up on any numeric/date column depending on what's missing in
+    # a given API response.
+    out = out.astype(object).where(pd.notnull(out), None)
     return out, unmapped_targets
 
 
@@ -192,7 +241,7 @@ def load_pitches(conn, df):
             f"""
             insert into pitches ({placeholders})
             values %s
-            on conflict (trackman_game_id, pitch_no) do nothing
+            on conflict (pitch_uid) do nothing
             """,
             values,
             template=None,
@@ -232,15 +281,18 @@ def main():
                 continue
 
             transformed, unmapped = transform(df, tid, g["season_year"])
-            if unmapped and i == 0:
-                print(f"  NOTE: these target fields found no matching source column: {unmapped}")
+            if n_success == 0 and n_error == 0:
+                if unmapped:
+                    print(f"  NOTE: these target fields found no matching source column: {unmapped}")
                 print(f"        Actual columns in the response: {list(df.columns)}")
+                print(f"        Sample row (actual values): {df.iloc[0].to_dict()}")
 
             n_rows = load_pitches(conn, transformed)
             mark_game(conn, tid, "success")
             n_success += 1
             print(f"  Inserted {n_rows} pitch rows.")
         except Exception as e:
+            conn.rollback()  # required before this connection can run another query -- see the bug this fixes in the README/chat log
             mark_game(conn, tid, "error", str(e)[:500])
             n_error += 1
             print(f"  ERROR: {e}")
@@ -256,3 +308,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
