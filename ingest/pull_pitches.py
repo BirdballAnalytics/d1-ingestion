@@ -58,6 +58,8 @@ COLUMN_MAP = {
     "date":                 ["gameDate"],
     "inning":                ["inning"],
     "top_bottom":             ["side"],                    # values not yet confirmed (Top/Bottom? T/B?)
+    "pitcher_team_id":         ["pitchingTeamid"],          # confirmed present in real responses; was only ever populated via a one-time backfill migration, never by this script -- that's the bug being fixed here
+    "batter_team_id":           ["battingTeamid"],          # same as above
     "outs":                    ["outs"],
     "balls":                    ["balls"],
     "strikes":                   ["strikes"],
@@ -184,6 +186,28 @@ def transform(df, trackman_game_id, season_year):
 
     out["trackman_game_id"] = trackman_game_id
     out["season_year"] = season_year
+
+    # Normalize team IDs to clean integer-string form ("730181888", not
+    # "730181888.0"). Without this, if pandas happened to read the source
+    # column as float (which it silently does whenever ANY row in that
+    # column is missing, even if this particular row isn't), the ID would
+    # get a trailing ".0" baked in as text -- which would then silently
+    # fail to exact-match teams.team_id (built cleanly via Python's own
+    # str(int(...))), reproducing the exact matching bug this whole fix
+    # is meant to solve, just moved one step over.
+    def _clean_id(val):
+        if val is None:
+            return None
+        try:
+            if isinstance(val, float) and pd.isna(val):
+                return None
+        except TypeError:
+            pass
+        s = str(val)
+        return s[:-2] if s.endswith(".0") else s
+    out["pitcher_team_id"] = out["pitcher_team_id"].apply(_clean_id)
+    out["batter_team_id"] = out["batter_team_id"].apply(_clean_id)
+
     # pitch_no: no true sequence field exists in the real response: use
     # row position in the pulled dataframe as a best-effort display value.
     # NOT used for deduplication -- pitch_uid handles that.
