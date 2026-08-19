@@ -12,6 +12,14 @@ name: Ingest D1 pitch data
       season:
         description: 'Season year to discover games for (leave blank to skip discovery and just pull pending games)'
         required: false
+      limit:
+        description: 'Max games to pull this run (e.g. 200 for a big weekend catch-up pull)'
+        required: false
+        default: '500'
+      max_minutes:
+        description: 'Time budget in minutes (must stay comfortably under this workflow''s timeout-minutes below)'
+        required: false
+        default: '25'
 
 permissions:
   contents: read
@@ -19,7 +27,12 @@ permissions:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # High enough to comfortably cover an on-demand big pull (e.g. a full
+    # Friday-night D1 slate, ~150-200 games) without needing to touch this
+    # file each time -- routine scheduled runs still typically finish in
+    # under 25 minutes regardless, this ceiling only matters when a run
+    # actually needs the extra room.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -48,4 +61,10 @@ jobs:
           TRUMEDIA_SITENAME: ${{ secrets.TRUMEDIA_SITENAME }}
           TRUMEDIA_MASTER_TOKEN: ${{ secrets.TRUMEDIA_MASTER_TOKEN }}
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: python pull_pitches.py --limit 40 --max-minutes 25
+        # Scheduled runs have no workflow_dispatch inputs, so they fall
+        # back to the 500/25 defaults below -- same routine behavior as
+        # before. A manual run can override both from the Actions UI.
+        run: >
+          python pull_pitches.py
+          --limit ${{ github.event.inputs.limit || '500' }}
+          --max-minutes ${{ github.event.inputs.max_minutes || '25' }}

@@ -62,12 +62,16 @@ def upsert_teams(conn, teams_df):
             continue
         rows.append((
             team_id,
+<<<<<<< HEAD
             # fullName confirmed against real data to be the actual school
             # name ("Abilene Christian University") on every row checked;
             # teamName is inconsistent -- sometimes a mascot ("Wildcats"),
             # sometimes a partial name, depending on the team. Prefer
             # fullName; fall back to teamName only if fullName is missing.
             r.get("fullName") or r.get("teamName"),
+=======
+            r.get("teamName") or r.get("fullName"),
+>>>>>>> ad853e550bb56ca731e9770a8b675c6024cbdc5c
             r.get("conference"),   # not present in AllTeams today; kept in case it's added later
             None,                  # division unknown from AllTeams alone -- see note in README
             psycopg2.extras.Json(r.dropna().to_dict()),
