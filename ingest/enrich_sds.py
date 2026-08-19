@@ -178,17 +178,35 @@ def train_and_score(df):
     return model_df[["pitch_uid", "sds"]], league_mean, league_sd
 
 
-def write_back(conn, scored, league_mean, league_sd):
-    print(f"Writing {len(scored)} SDS scores back to pitches (bulk update via temp table)...")
-    with conn.cursor() as cur:
-        cur.execute("create temp table sds_tmp (pitch_uid text, sds numeric) on commit drop")
-        psycopg2.extras.execute_values(
-            cur, "insert into sds_tmp (pitch_uid, sds) values %s",
-            list(scored.itertuples(index=False, name=None)),
-        )
-        cur.execute("update pitches set sds = sds_tmp.sds from sds_tmp where pitches.pitch_uid = sds_tmp.pitch_uid")
-        print(f"  Updated {cur.rowcount} rows.")
+def write_back(conn, scored, league_mean, league_sd, batch_size=10000):
+    # Batched rather than one giant UPDATE -- a single statement touching
+    # 650k+ rows hit Supabase's statement timeout on the first real run
+    # against the full dataset. Small batches, each committed separately,
+    # stay comfortably under any reasonable timeout AND mean a failure
+    # partway through doesn't lose already-written progress (unlike the
+    # single-statement version, where a timeout rolled back everything).
+    print(f"Writing {len(scored)} SDS scores back to pitches in batches of {batch_size}...")
+    rows = list(scored.itertuples(index=False, name=None))
+    total_updated = 0
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i + batch_size]
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                update pitches set sds = data.sds
+                from (values %s) as data(pitch_uid, sds)
+                where pitches.pitch_uid = data.pitch_uid
+                """,
+                batch,
+                template="(%s, %s::numeric)",
+            )
+            total_updated += cur.rowcount
+        conn.commit()
+        print(f"  Batch {i // batch_size + 1}/{(len(rows) - 1) // batch_size + 1}: {total_updated}/{len(rows)} rows updated so far...")
+    print(f"  Total updated: {total_updated} rows.")
 
+    with conn.cursor() as cur:
         cur.execute(
             """
             insert into sds_meta (id, league_mean_sds, league_sd_sds, n_pitches, computed_at)
