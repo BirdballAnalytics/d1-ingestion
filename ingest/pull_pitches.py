@@ -58,11 +58,8 @@ COLUMN_MAP = {
     "date":                 ["gameDate"],
     "inning":                ["inning"],
     "top_bottom":             ["side"],                    # values not yet confirmed (Top/Bottom? T/B?)
-<<<<<<< HEAD
     "pitcher_team_id":         ["pitchingTeamid"],          # confirmed present in real responses; was only ever populated via a one-time backfill migration, never by this script -- that's the bug being fixed here
     "batter_team_id":           ["battingTeamid"],          # same as above
-=======
->>>>>>> ad853e550bb56ca731e9770a8b675c6024cbdc5c
     "outs":                    ["outs"],
     "balls":                    ["balls"],
     "strikes":                   ["strikes"],
@@ -189,7 +186,6 @@ def transform(df, trackman_game_id, season_year):
 
     out["trackman_game_id"] = trackman_game_id
     out["season_year"] = season_year
-<<<<<<< HEAD
 
     # Normalize team IDs to clean integer-string form ("730181888", not
     # "730181888.0"). Without this, if pandas happened to read the source
@@ -212,8 +208,6 @@ def transform(df, trackman_game_id, season_year):
     out["pitcher_team_id"] = out["pitcher_team_id"].apply(_clean_id)
     out["batter_team_id"] = out["batter_team_id"].apply(_clean_id)
 
-=======
->>>>>>> ad853e550bb56ca731e9770a8b675c6024cbdc5c
     # pitch_no: no true sequence field exists in the real response: use
     # row position in the pulled dataframe as a best-effort display value.
     # NOT used for deduplication -- pitch_uid handles that.
