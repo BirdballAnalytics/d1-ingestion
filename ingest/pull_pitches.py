@@ -91,10 +91,19 @@ COLUMN_MAP = {
     "horz_appr_angle":                                                      ["horzApprAngle"],
     "exit_speed":                                                             ["exitVelocity"],
     "angle":                                                                    ["launchAngle"],
+    # Newly added, requested via the `columns` parameter above -- NOT
+    # part of the default response, so these are unverified against a
+    # live pull. Source names are a best guess at how they'll come back
+    # (matching the "ContactX|EVENT" style glossary names as plain
+    # "ContactX" once actually in a response row) -- check the "Sample
+    # row" log output and adjust these if the real keys differ.
+    "contact_position_x":                                                         ["ContactX", "contactX"],
+    "contact_position_y":                                                           ["ContactY", "contactY"],
+    "contact_position_z":                                                             ["ContactZ", "contactZ"],
+    "direction":                                                                         ["ExitDir", "exitDir"],
     # No match found in the real response for these -- left unmapped on
     # purpose rather than guessing at a wrong column:
-    #   tagged_hit_type, runs_scored, effective_velo, direction,
-    #   distance, bearing, contact_position_x/y/z
+    #   tagged_hit_type, runs_scored, effective_velo, distance, bearing
 }
 
 # plate_loc_height/plate_loc_side (pzNorm/pxNorm) are confirmed NOT to be
@@ -302,7 +311,16 @@ def main():
         tid = g["trackman_game_id"]
         print(f"[{i+1}/{len(games)}] Pulling {tid} ...")
         try:
-            text = client.query("GamePitchesTrackman", {"trackmanGameId": tid})
+            # Requesting contact-point and exit-direction fields explicitly
+            # via `columns` -- confirmed (from the site's own glossary,
+            # shared directly by the user) that these exist as event-level
+            # fields but aren't part of GamePitchesTrackman's default
+            # response. UNVERIFIED against a live response as of this
+            # change -- check the "Sample row" log output on the next
+            # real run to confirm these columns actually come back, and
+            # under what exact key names.
+            extra_columns = "[ContactX|EVENT],[ContactY|EVENT],[ContactZ|EVENT],[ExitDir|EVENT]"
+            text = client.query("GamePitchesTrackman", {"trackmanGameId": tid, "columns": extra_columns})
             df = pd.read_csv(io.StringIO(text))
             if df.empty:
                 mark_game(conn, tid, "skipped", "Empty response")
